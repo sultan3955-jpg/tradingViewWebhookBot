@@ -33,10 +33,11 @@ def test_webhook_security_and_dedup(tmp_path):
                      webhook_token=TOKEN, admin_token=ADMIN, ai_enabled=False)
     with TestClient(app) as client:
         assert client.post("/radar/webhook/wrong", json=payload()).status_code == 403
-        one = client.post(f"/radar/webhook/{TOKEN}", json=payload())
+        sample = payload()  # Same symbol, direction and candle-close time.
+        one = client.post(f"/radar/webhook/{TOKEN}", json=sample)
         assert one.status_code == 200, one.text
         assert one.json()["analysis"]["verdict"] == "LONG_WATCH"
-        assert client.post(f"/radar/webhook/{TOKEN}", json=payload()).json()["status"] == "duplicate"
+        assert client.post(f"/radar/webhook/{TOKEN}", json=sample).json()["status"] == "duplicate"
         assert client.get("/radar/events").status_code == 401
         rows = client.get("/radar/events", headers={"X-Admin-Token": ADMIN}).json()["events"]
         assert len(rows) == 1
