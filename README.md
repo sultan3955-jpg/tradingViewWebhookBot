@@ -54,13 +54,15 @@ pip install -r requirements.txt
 cp .env.example .env
 # On Windows PowerShell use: copy .env.example .env
 
-# Edit .env and add your secret
+# Edit .env and configure both independent secrets
 nano .env
 ```
 
 Your `.env` file should look like:
 ```bash
-WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
+# Generate each value separately with: python -c "import secrets; print(secrets.token_urlsafe(32))"
+WEBHOOK_SECRET=<random value of at least 32 characters>
+ADMIN_API_TOKEN=<different random value of at least 32 characters>
 ```
 
 ### 3. Run the Server
@@ -69,7 +71,35 @@ WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 python main.py
 ```
 
-Server will start on `http://localhost:8000`
+Server will start on `http://localhost:8001` when run with `python main.py`.
+The deployment examples below explicitly use port 8000 via Uvicorn.
+
+### Security configuration
+
+Deploy `main:app`. The legacy `main2.py`, `main3.py`, and `main4.py` are not
+covered by these fixes and must not be exposed as alternative entry points.
+
+Only `/health` and `/webhook` are public. All other routes, including API docs,
+require the `X-Admin-Token` header. Never put the admin token in a TradingView
+alert; alerts use only `WEBHOOK_SECRET`. The server refuses startup with missing,
+short, or identical credentials. Update any clients that read reports accordingly.
+
+Webhook bodies are limited to 64 KiB, and reconciliation CSV files to 1 MiB.
+Use HTTPS and enforce upload limits and request rates at the reverse proxy as
+well, since multipart parsing happens before the endpoint reads an uploaded file.
+Stored webhook JSON redacts recognized credential keys recursively. Avoid placing
+credentials in free-text fields; those fields are not detected as secrets.
+
+If an older deployment stored real webhook secrets, rotate those secrets.
+`scrub_history.py` can redact recognized keys in local `signals.db` and
+`trade_signals.csv`; make a secure offline backup before running it. It does not
+rewrite Git history, archived fixtures, WAL files, or backups.
+
+Run the isolated application and security checks without a live server:
+
+```bash
+python -m pytest tests -q
+```
 
 ## 🔌 API Endpoints
 
@@ -245,7 +275,7 @@ curl -X POST http://localhost:8000/webhook \
   }'
 
 # Get signals
-curl http://localhost:8000/signals
+curl -H "X-Admin-Token: $ADMIN_API_TOKEN" http://localhost:8000/signals
 ```
 
 ## 📊 TradingView Alert Configuration

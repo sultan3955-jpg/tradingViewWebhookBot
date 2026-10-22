@@ -26,14 +26,18 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status, UploadFile, File
 from fastapi.responses import JSONResponse, FileResponse
+from qaisar_security import (read_limited_body, redact_sensitive, secure_equal, safe_json_text, RECONCILIATION_MAX_BYTES)  # Qaisar security hardening v1
 from pydantic import BaseModel, validator
 from dotenv import load_dotenv
 
 load_dotenv()
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-if not WEBHOOK_SECRET:
-    raise ValueError("WEBHOOK_SECRET environment variable is required")
+if not WEBHOOK_SECRET or len(WEBHOOK_SECRET) < 32:
+    raise ValueError("WEBHOOK_SECRET must be at least 32 characters")
+ADMIN_API_TOKEN = os.getenv("ADMIN_API_TOKEN", "")
+if len(ADMIN_API_TOKEN) < 32 or secure_equal(ADMIN_API_TOKEN, WEBHOOK_SECRET):
+    raise ValueError("ADMIN_API_TOKEN must be distinct and at least 32 characters")
 
 DATABASE_FILE = "signals.db"
 CSV_FILE = "trade_signals.csv"
@@ -54,6 +58,15 @@ app = FastAPI(
     version="3.1.1",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def protect_private_routes(request: Request, call_next):
+    # Public access is limited to health and TradingView webhook routes.
+    if request.url.path not in ("/health", "/webhook"):
+        if not secure_equal(request.headers.get("x-admin-token"), ADMIN_API_TOKEN):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 
 class WebhookPayload(BaseModel):
@@ -279,22 +292,30 @@ def convert_strategy_to_bot_payload(data: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/webhook", status_code=status.HTTP_201_CREATED)
 async def receive_webhook(request: Request):
     try:
-        raw_body = await request.body()
-        original_raw_payload = raw_body.decode("utf-8")
+        raw_body = await read_limited_body(request)
+        try:
+            original_raw_payload = raw_body.decode("utf-8")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid UTF-8 payload")
 
         try:
             data = json.loads(original_raw_payload)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON payload")
 
+        if not isinstance(data, dict):
+            raise HTTPException(status_code=400, detail="Expected a JSON object")
         if "secret" not in data:
             raise HTTPException(status_code=401, detail="Missing secret")
 
-        if data.get("secret") != WEBHOOK_SECRET:
+        if not secure_equal(data.get("secret"), WEBHOOK_SECRET):
             raise HTTPException(status_code=403, detail="Invalid secret")
 
         if "order_action" in data and "position_size" in data:
-            normalized_data = convert_strategy_to_bot_payload(data)
+            try:
+                normalized_data = convert_strategy_to_bot_payload(data)
+            except (ValueError, TypeError, OverflowError):
+                raise HTTPException(status_code=400, detail="Invalid strategy schema")
             raw_payload_to_store = json.dumps({
                 "original_strategy_payload": data,
                 "normalized_bot_payload": normalized_data,
@@ -303,10 +324,12 @@ async def receive_webhook(request: Request):
             normalized_data = data
             raw_payload_to_store = original_raw_payload
 
+        # Never persist raw webhook keys in SQLite or CSV.
+        raw_payload_to_store = safe_json_text(json.loads(raw_payload_to_store))
         try:
             payload = WebhookPayload(**normalized_data)
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
+            raise HTTPException(status_code=400, detail="Invalid alert schema")
 
         if is_duplicate(payload.source, payload.action, payload.symbol, payload.timeframe, payload.price):
             return JSONResponse(
@@ -338,7 +361,7 @@ async def receive_webhook(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -410,7 +433,7 @@ async def get_stats():
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Stats error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def write_performance_csv(closed_trades):
@@ -735,7 +758,7 @@ async def get_performance(
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Performance error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 def parse_strategy_tester_csv(csv_text: str, trade_date: Optional[str] = None):
@@ -833,8 +856,13 @@ async def trade_reconciliation(
     source: Optional[str] = "Greedy Futures Strategy",
 ):
     try:
-        content = await file.read()
-        csv_text = content.decode("utf-8-sig")
+        content = await file.read(RECONCILIATION_MAX_BYTES + 1)
+        if len(content) > RECONCILIATION_MAX_BYTES:
+            raise HTTPException(status_code=413, detail="Uploaded CSV exceeds 1 MiB")
+        try:
+            csv_text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=400, detail="Invalid CSV encoding")
 
         strategy_trades = parse_strategy_tester_csv(csv_text, trade_date=trade_date)
 
@@ -914,8 +942,10 @@ async def trade_reconciliation(
             "comparisons": comparisons,
         }
 
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Reconciliation error: {str(e)}")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 if __name__ == "__main__":
