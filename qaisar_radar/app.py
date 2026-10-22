@@ -198,7 +198,7 @@ def create_app(
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)""",
                 (
                     event_id, datetime.now(timezone.utc).isoformat(), alert.symbol,
-                    alert.side, result["verdict"], alert.volume, result["rvol"],
+                    alert.side, result["verdict"], alert.volume, result["rvol_20"],
                     json.dumps(result, ensure_ascii=False),
                     "queued" if ai_on else "disabled",
                 ),
