@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "test-secret")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "test-admin-token")
 BASE_URL = os.getenv("TEST_URL", "http://localhost:8001")
 
 try:
@@ -45,7 +46,7 @@ def test_webhook_valid():
     payload = {
         "secret": WEBHOOK_SECRET,
         "source": "Test Indicator",
-        "action": "BUY",
+        "action": "LONG",
         "symbol": "MNQ1!",
         "price": "22500.25",
         "timeframe": "15",
@@ -156,7 +157,7 @@ def test_webhook_duplicate():
     payload = {
         "secret": WEBHOOK_SECRET,
         "source": "Test",
-        "action": "SELL",
+        "action": "SHORT",
         "symbol": "ES1!",
         "price": "4500.00",
         "timeframe": "5",
@@ -183,7 +184,7 @@ def test_signals_endpoint():
     """Test /signals endpoint"""
     print("\n🧪 Testing /signals endpoint...")
     
-    response = httpx.get(f"{BASE_URL}/signals")
+    response = httpx.get(f"{BASE_URL}/signals", headers={"X-Admin-Token": ADMIN_TOKEN})
     
     if response.status_code == 200:
         data = response.json()
@@ -201,7 +202,7 @@ def main():
     print("TradingView Webhook Bot - Test Suite")
     print("=" * 50)
     print(f"Testing against: {BASE_URL}")
-    print(f"Using secret: {WEBHOOK_SECRET[:10]}...")
+    print("Using configured webhook secret")
     
     # Wait for server to be ready
     print("\n⏳ Waiting for server...")

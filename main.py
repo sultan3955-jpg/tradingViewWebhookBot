@@ -20,11 +20,12 @@ import json
 import csv
 import sqlite3
 import hashlib
+import hmac
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, status, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, status, UploadFile, File, Header, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, validator
 from dotenv import load_dotenv
@@ -34,6 +35,9 @@ load_dotenv()
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 if not WEBHOOK_SECRET:
     raise ValueError("WEBHOOK_SECRET environment variable is required")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+if not ADMIN_TOKEN:
+    raise ValueError("ADMIN_TOKEN environment variable is required")
 
 DATABASE_FILE = "signals.db"
 CSV_FILE = "trade_signals.csv"
@@ -54,6 +58,11 @@ app = FastAPI(
     version="3.1.1",
     lifespan=lifespan,
 )
+
+
+def require_admin(x_admin_token: Optional[str] = Header(default=None)):
+    if not x_admin_token or not hmac.compare_digest(x_admin_token, ADMIN_TOKEN):
+        raise HTTPException(status_code=401, detail="Invalid admin token")
 
 
 class WebhookPayload(BaseModel):
@@ -346,7 +355,7 @@ async def health_check():
     return HealthResponse(status="ok")
 
 
-@app.get("/signals")
+@app.get("/signals", dependencies=[Depends(require_admin)])
 async def get_signals(limit: int = 100):
     conn = sqlite3.connect(DATABASE_FILE)
     conn.row_factory = sqlite3.Row
@@ -373,7 +382,7 @@ def get_multiplier(symbol: str) -> float:
     return SYMBOL_MULTIPLIERS.get(symbol.upper(), 1)
 
 
-@app.get("/stats")
+@app.get("/stats", dependencies=[Depends(require_admin)])
 async def get_stats():
     try:
         conn = sqlite3.connect(DATABASE_FILE)
@@ -477,14 +486,14 @@ def write_performance_json(closed_trades):
         json.dump(report, f, indent=4)
 
 
-@app.get("/performance/export")
+@app.get("/performance/export", dependencies=[Depends(require_admin)])
 async def export_performance_csv():
     if not os.path.exists(PERFORMANCE_CSV_FILE):
         write_performance_csv([])
     return FileResponse(PERFORMANCE_CSV_FILE, media_type="text/csv", filename=PERFORMANCE_CSV_FILE)
 
 
-@app.get("/performance/json")
+@app.get("/performance/json", dependencies=[Depends(require_admin)])
 async def export_performance_json():
     if not os.path.exists(PERFORMANCE_JSON_FILE):
         write_performance_json([])
@@ -643,7 +652,7 @@ def build_closed_trades_from_rows(rows):
     return closed_trades, list(open_positions.values())
 
 
-@app.get("/performance")
+@app.get("/performance", dependencies=[Depends(require_admin)])
 async def get_performance(
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
@@ -824,7 +833,7 @@ def build_bot_closed_trades_for_reconciliation(
     return closed_trades
 
 
-@app.post("/trade_reconciliation")
+@app.post("/trade_reconciliation", dependencies=[Depends(require_admin)])
 async def trade_reconciliation(
     file: UploadFile = File(...),
     trade_date: Optional[str] = None,

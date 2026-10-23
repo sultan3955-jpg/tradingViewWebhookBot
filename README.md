@@ -61,6 +61,7 @@ nano .env
 Your `.env` file should look like:
 ```bash
 WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
+ADMIN_TOKEN=YOUR_ADMIN_TOKEN
 ```
 
 ### 3. Run the Server
@@ -69,7 +70,7 @@ WEBHOOK_SECRET=YOUR_WEBHOOK_SECRET
 python main.py
 ```
 
-Server will start on `http://localhost:8000`
+Server will start on `http://localhost:8001`
 
 ## 🔌 API Endpoints
 
@@ -212,10 +213,10 @@ Download performance JSON export
 
 ```bash
 # Health check
-curl http://localhost:8000/health
+curl http://localhost:8001/health
 
 # Valid indicator webhook
-curl -X POST http://localhost:8000/webhook \
+curl -X POST http://localhost:8001/webhook \
   -H "Content-Type: application/json" \
   -d '{
     "secret": "YOUR_WEBHOOK_SECRET",
@@ -229,7 +230,7 @@ curl -X POST http://localhost:8000/webhook \
   }'
 
 # Valid strategy webhook
-curl -X POST http://localhost:8000/webhook \
+curl -X POST http://localhost:8001/webhook \
   -H "Content-Type: application/json" \
   -d '{
     "secret": "YOUR_WEBHOOK_SECRET",
@@ -244,8 +245,8 @@ curl -X POST http://localhost:8000/webhook \
     "timestamp": "2026-06-08T09:45:00Z"
   }'
 
-# Get signals
-curl http://localhost:8000/signals
+# Get signals (use the ADMIN_TOKEN from your environment)
+curl -H "X-Admin-Token: $ADMIN_TOKEN" http://localhost:8001/signals
 ```
 
 ## 📊 TradingView Alert Configuration
@@ -285,6 +286,14 @@ curl http://localhost:8000/signals
 TradingView will send the strategy payload and the bot converts it into a normalized signal action automatically.
 
 ## 🌐 Deployment
+
+### Render Blueprint
+
+The repository includes `render.yaml` for a Render web service. In the Render dashboard, create a new Blueprint from this GitHub repository. The Blueprint uses a Starter service with a 1 GB persistent disk mounted at `/var/data`; a paid Render plan is required for persistent storage. Render generates separate `WEBHOOK_SECRET` and `ADMIN_TOKEN` values. Keep both private.
+
+Wait for the deployment to become healthy, then check `https://<your-render-hostname>/health`. Configure the TradingView webhook URL as `https://<your-render-hostname>/webhook` and place the generated `WEBHOOK_SECRET` in each TradingView alert payload. Read endpoints (`/signals`, `/stats`, `/performance`, its exports, and `/trade_reconciliation`) require an `X-Admin-Token` header containing `ADMIN_TOKEN`.
+
+The service stores its SQLite database and CSV/JSON exports on the persistent disk. Render creates the service when you apply the Blueprint; adding this file alone does not create or start a Render service.
 
 ### Option 1: VPS/Cloud Server (Recommended)
 
