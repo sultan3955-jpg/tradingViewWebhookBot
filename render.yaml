@@ -2,9 +2,9 @@ services:
   - type: web
     name: tradingview-webhook-bot
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: export PYTHONPATH="$PWD"; cd /var/data && exec uvicorn main:app --host 0.0.0.0 --port "$PORT"
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -13,7 +13,3 @@ services:
         generateValue: true
       - key: ADMIN_TOKEN
         generateValue: true
-    disk:
-      name: signals-data
-      mountPath: /var/data
-      sizeGB: 1
