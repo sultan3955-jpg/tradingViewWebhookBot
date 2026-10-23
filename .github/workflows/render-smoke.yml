@@ -1,0 +1,55 @@
+name: Render app smoke test
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".python-version"
+      - "main.py"
+      - "drive_backup.py"
+      - "requirements.txt"
+      - "test_drive_backup.py"
+      - ".github/workflows/render-smoke.yml"
+  pull_request:
+    paths:
+      - ".python-version"
+      - "main.py"
+      - "drive_backup.py"
+      - "requirements.txt"
+      - "test_drive_backup.py"
+      - ".github/workflows/render-smoke.yml"
+permissions:
+  contents: read
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: ".python-version"
+      - run: python -m pip install -r requirements.txt
+      - run: python -m compileall -q main.py drive_backup.py
+      - run: python -m unittest -q test_drive_backup.py
+      - name: Start app and check health
+        env:
+          WEBHOOK_SECRET: test-secret
+          ADMIN_TOKEN: test-admin-token
+        run: |
+          python -m uvicorn main:app --host 127.0.0.1 --port 8001 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          python - <<'PY'
+          import time
+          import httpx
+          for attempt in range(30):
+              try:
+                  response = httpx.get("http://127.0.0.1:8001/health")
+                  response.raise_for_status()
+                  assert response.json()["status"] == "ok"
+                  break
+              except (httpx.HTTPError, AssertionError):
+                  time.sleep(1)
+          else:
+              raise SystemExit("App did not become healthy")
+          PY
