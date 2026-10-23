@@ -1,0 +1,32 @@
+//@version=6
+indicator("Qaisar US Radar v1 | VWAP RVOL Volume", overlay=true)
+
+// Add to US equity 5-minute chart. Create alert using "Any alert() function call".
+// The webhook URL holds your secret; NEVER insert it in this script or public repository.
+minVol = input.float(100000, "Min 5m share volume", minval=0)
+minRvol = input.float(1.8, "Min RVOL(20)", minval=0.1)
+onlyRth = input.bool(true, "Regular trading hours only")
+is5m = timeframe.isminutes and timeframe.multiplier == 5
+rth = not na(time(timeframe.period, "0930-1600:1234567", "America/New_York"))
+eligible = is5m and (not onlyRth or rth) and syminfo.type == "stock"
+
+avgVol = ta.sma(volume[1], 20)
+rvol = avgVol > 0 ? volume / avgVol : na
+vwapValue = ta.vwap(hlc3)
+ema20 = ta.ema(close, 20)
+ema50 = ta.ema(close, 50)
+rsi14 = ta.rsi(close, 14)
+volumeOK = volume >= minVol and rvol >= minRvol
+longSignal = eligible and barstate.isconfirmed and not na(rvol) and volumeOK and close > open and close > high[1] and close > vwapValue and ema20 > ema50 and rsi14 >= 50
+shortSignal = eligible and barstate.isconfirmed and not na(rvol) and volumeOK and close < open and close < low[1] and close < vwapValue and ema20 < ema50 and rsi14 <= 50
+
+plot(vwapValue, "VWAP", color=color.orange, linewidth=2)
+plot(ema20, "EMA20", color=color.aqua)
+plot(ema50, "EMA50", color=color.purple)
+plotshape(longSignal, "LONG WATCH", shape.triangleup, location.belowbar, color=color.lime, size=size.small)
+plotshape(shortSignal, "SHORT WATCH", shape.triangledown, location.abovebar, color=color.red, size=size.small)
+
+if longSignal or shortSignal
+    direction = longSignal ? "LONG_WATCH" : "SHORT_WATCH"
+    message = '{"symbol":"' + syminfo.ticker + '","exchange":"' + syminfo.prefix + '","timeframe":"5","side":"' + direction + '","bar_time":' + str.tostring(time_close) + ',"price":' + str.tostring(close) + ',"candle_open":' + str.tostring(open) + ',"previous_high":' + str.tostring(high[1]) + ',"previous_low":' + str.tostring(low[1]) + ',"volume":' + str.tostring(volume) + ',"avg_volume_20":' + str.tostring(avgVol) + ',"vwap":' + str.tostring(vwapValue) + ',"ema20":' + str.tostring(ema20) + ',"ema50":' + str.tostring(ema50) + ',"rsi14":' + str.tostring(rsi14) + '}'
+    alert(message, alert.freq_once_per_bar_close)
