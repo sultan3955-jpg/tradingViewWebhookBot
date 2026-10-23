@@ -21,6 +21,8 @@ import csv
 import sqlite3
 import hashlib
 import hmac
+import asyncio
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any
 from contextlib import asynccontextmanager
@@ -29,6 +31,7 @@ from fastapi import FastAPI, HTTPException, Request, status, UploadFile, File, H
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import BaseModel, validator
 from dotenv import load_dotenv
+from drive_backup import DriveBackup, redact_json_text
 
 load_dotenv()
 
@@ -38,6 +41,11 @@ if not WEBHOOK_SECRET:
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 if not ADMIN_TOKEN:
     raise ValueError("ADMIN_TOKEN environment variable is required")
+DRIVE_BACKUP = DriveBackup.from_environment()
+if os.getenv("REQUIRE_DRIVE_BACKUP") == "1" and DRIVE_BACKUP is None:
+    raise ValueError("Google Drive backup must be configured before the service starts")
+BACKUP_PENDING = False
+logger = logging.getLogger(__name__)
 
 DATABASE_FILE = "signals.db"
 CSV_FILE = "trade_signals.csv"
@@ -48,7 +56,12 @@ DUPLICATE_WINDOW_SECONDS = 10
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if DRIVE_BACKUP:
+        DRIVE_BACKUP.restore(DATABASE_FILE)
     init_database()
+    if DRIVE_BACKUP:
+        rebuild_csv_from_database()
+    app.state.write_lock = asyncio.Lock()
     yield
 
 
@@ -147,6 +160,17 @@ def init_database():
                 "id", "received_at", "source", "action", "symbol",
                 "price", "timeframe", "exchange", "alert_timestamp", "raw_payload"
             ])
+
+
+def rebuild_csv_from_database():
+    """CSV is derived from the restored database, so it need not be uploaded."""
+    with sqlite3.connect(DATABASE_FILE) as conn, open(CSV_FILE, "w", newline="") as out:
+        writer = csv.writer(out)
+        writer.writerow(["id", "received_at", "source", "action", "symbol", "price",
+                         "timeframe", "exchange", "alert_timestamp", "raw_payload"])
+        for row in conn.execute("SELECT id, received_at, source, action, symbol, price, "
+                                "timeframe, exchange, alert_timestamp, raw_payload FROM signals ORDER BY id"):
+            writer.writerow((*row[:-1], redact_json_text(row[-1])))
 
 
 def generate_duplicate_hash(source: str, action: str, symbol: str, timeframe: str, price: str) -> str:
@@ -287,6 +311,7 @@ def convert_strategy_to_bot_payload(data: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/webhook", status_code=status.HTTP_201_CREATED)
 async def receive_webhook(request: Request):
+    global BACKUP_PENDING
     try:
         raw_body = await request.body()
         original_raw_payload = raw_body.decode("utf-8")
@@ -317,19 +342,38 @@ async def receive_webhook(request: Request):
         except ValueError as e:
             raise HTTPException(status_code=400, detail=f"Validation error: {str(e)}")
 
-        if is_duplicate(payload.source, payload.action, payload.symbol, payload.timeframe, payload.price):
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "status": "ignored",
-                    "reason": "duplicate_detected",
-                    "action": payload.action,
-                    "symbol": payload.symbol,
-                },
-            )
+        # Serialize writes and remote snapshots to avoid uploading an older image
+        # over a newer one when two TradingView alerts arrive at once.
+        async with request.app.state.write_lock:
+            if is_duplicate(payload.source, payload.action, payload.symbol, payload.timeframe, payload.price):
+                if DRIVE_BACKUP and BACKUP_PENDING:
+                    try:
+                        await asyncio.to_thread(DRIVE_BACKUP.save, DATABASE_FILE)
+                        BACKUP_PENDING = False
+                    except Exception:
+                        logger.exception("Google Drive backup retry failed")
+                        raise HTTPException(status_code=503, detail="Signal backup unavailable")
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "status": "ignored",
+                        "reason": "duplicate_detected",
+                        "action": payload.action,
+                        "symbol": payload.symbol,
+                    },
+                )
 
-        signal_id = log_to_database(payload, raw_payload_to_store)
-        append_to_csv(signal_id, payload, raw_payload_to_store)
+            raw_payload_to_store = redact_json_text(raw_payload_to_store)
+            signal_id = log_to_database(payload, raw_payload_to_store)
+            append_to_csv(signal_id, payload, raw_payload_to_store)
+            if DRIVE_BACKUP:
+                BACKUP_PENDING = True
+                try:
+                    await asyncio.to_thread(DRIVE_BACKUP.save, DATABASE_FILE)
+                    BACKUP_PENDING = False
+                except Exception:
+                    logger.exception("Google Drive backup failed")
+                    raise HTTPException(status_code=503, detail="Signal backup unavailable")
 
         return JSONResponse(
             status_code=201,
@@ -347,7 +391,8 @@ async def receive_webhook(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+        logger.exception("Webhook processing failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -930,3 +975,4 @@ async def trade_reconciliation(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
+
